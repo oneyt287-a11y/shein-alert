@@ -18,7 +18,7 @@ CHECK_INTERVAL = 120
 DATA_FILE = "products.json"
 
 # ==========================
-# FLASK (Railway keep-alive)
+# FLASK (Railway keep alive)
 # ==========================
 
 app = Flask(__name__)
@@ -76,22 +76,52 @@ def send_photo(caption, image_url):
 # VOUCHER LOGIC
 # ==========================
 
-def voucher_text(price):
-    if price < 500:
+def voucher_text(price_value):
+    if price_value < 500:
         return "🎟 Use ₹500 Voucher"
-    elif price < 1000:
+    elif price_value < 1000:
         return "🎟 Use ₹1000 Voucher"
     else:
         return "🎟 Eligible for ₹1000 Voucher"
 
 # ==========================
-# SIZE EXTRACTION (From category API)
+# PRICE FIX (Accurate)
+# ==========================
+
+def get_correct_price(product):
+    offer = product.get("offerPrice", {})
+    regular = product.get("price", {})
+
+    offer_value = offer.get("value")
+    regular_value = regular.get("value")
+
+    # Determine numeric price
+    if offer_value and regular_value:
+        if offer_value < regular_value:
+            final_value = offer_value
+            display = offer.get("displayformattedValue")
+        else:
+            final_value = regular_value
+            display = regular.get("displayformattedValue")
+    elif offer_value:
+        final_value = offer_value
+        display = offer.get("displayformattedValue")
+    elif regular_value:
+        final_value = regular_value
+        display = regular.get("displayformattedValue")
+    else:
+        final_value = 0
+        display = "₹0"
+
+    return final_value, display
+
+# ==========================
+# SIZE EXTRACTION
 # ==========================
 
 def extract_sizes(product):
     sizes = set()
 
-    # Shein category response sometimes includes skuList / variantOptions
     variants = product.get("skuList") or product.get("variantOptions") or []
 
     for v in variants:
@@ -129,11 +159,8 @@ while True:
             code = str(p.get("code"))
             name = p.get("name")
 
-            price = (
-                p.get("offerPrice", {}).get("value")
-                or p.get("price", {}).get("value")
-                or 0
-            )
+            # Get correct price
+            price_value, display_price = get_correct_price(p)
 
             # Image
             image = None
@@ -145,7 +172,6 @@ while True:
             link_path = p.get("url")
             link = "https://www.sheinindia.in" + link_path
 
-            # Extract sizes from category response
             current_sizes = extract_sizes(p)
 
             previous_data = stored_products.get(code)
@@ -163,10 +189,10 @@ while True:
                 caption = f"""🆕 <b>NEW PRODUCT</b>
 
 🛍 <b>{name}</b>
-💰 ₹{price}
+💰 {display_price}
 📦 Sizes: {", ".join(current_sizes) if current_sizes else "Available"}
 
-{voucher_text(price)}
+{voucher_text(price_value)}
 
 🔗 {link}
 """
@@ -186,7 +212,6 @@ while True:
                 sold_out = old_sizes - current_sizes
                 restocked = current_sizes - old_sizes
 
-                # SIZE SOLD OUT
                 if sold_out:
                     message = f"""⚠️ <b>SIZE SOLD OUT</b>
 
@@ -197,7 +222,6 @@ while True:
 """
                     send_message(message)
 
-                # SIZE RESTOCK
                 if restocked:
                     message = f"""🔁 <b>SIZE RESTOCKED</b>
 
@@ -208,7 +232,6 @@ while True:
 """
                     send_message(message)
 
-                # Update stored sizes
                 stored_products[code]["sizes"] = list(current_sizes)
                 save_data(stored_products)
 
