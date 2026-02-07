@@ -1,71 +1,80 @@
-import asyncio
 import requests
-import os
 import time
+import json
+import os
 import threading
 from flask import Flask
-from playwright.async_api import async_playwright
 
 # ==========================
-# BASIC CONFIG
+# CONFIG
 # ==========================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 
-SHEINVERSE_URL = "https://www.sheinindia.in/c/she-inverse"
+API_URL = "https://www.sheinindia.in/api/category/sverse-5939-37961?fields=SITE&currentPage=1&pageSize=45&format=json&query=%3Arelevance&gridColumns=5&advfilter=true&platform=Desktop&showAdsOnNextPage=false&is_ads_enable_plp=true&displayRatings=true&segmentIds=&&store=shein"
 
-CHECK_INTERVAL = 120          # 2 minutes (free tier safe)
-HEARTBEAT_INTERVAL = 21600    # 6 hours
+CHECK_INTERVAL = 120  # seconds
 
-product_status = {}
-last_heartbeat = time.time()
+DATA_FILE = "products.json"
 
 # ==========================
-# KEEP-ALIVE WEB SERVER
+# FLASK KEEP-ALIVE
 # ==========================
 
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "SHEINVERSE Monitor Running"
+    return "SHEINVERSE API BOT Running"
 
 def run_web():
     app.run(host="0.0.0.0", port=8000)
 
-threading.Thread(target=run_web).start()
+threading.Thread(target=run_web, daemon=True).start()
 
 # ==========================
-# TELEGRAM FUNCTIONS
+# STORAGE
+# ==========================
+
+def load_data():
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, "r") as f:
+            return json.load(f)
+    return {}
+
+def save_data(data):
+    with open(DATA_FILE, "w") as f:
+        json.dump(data, f)
+
+stored_products = load_data()
+
+# ==========================
+# TELEGRAM
 # ==========================
 
 def send_message(text):
     try:
-        requests.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            data={
-                "chat_id": CHANNEL_ID,
-                "text": text,
-                "parse_mode": "HTML"
-            },
-            timeout=10
-        )
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": CHANNEL_ID,
+            "text": text,
+            "parse_mode": "HTML"
+        }
+        requests.post(url, data=payload, timeout=10)
     except:
         pass
 
 def send_photo(caption, image_url):
     try:
-        requests.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
-            data={
-                "chat_id": CHANNEL_ID,
-                "photo": image_url,
-                "caption": caption,
-                "parse_mode": "HTML"
-            },
-            timeout=15
-        )
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
+        payload = {
+            "chat_id": CHANNEL_ID,
+            "photo": image_url,
+            "caption": caption,
+            "parse_mode": "HTML"
+        }
+        requests.post(url, data=payload, timeout=15)
     except:
         pass
 
@@ -73,107 +82,79 @@ def send_photo(caption, image_url):
 # VOUCHER LOGIC
 # ==========================
 
-def apply_voucher(price):
+def voucher_text(price):
     if price < 500:
         return "🎟 Use ₹500 Voucher"
-    elif 500 <= price < 1000:
+    elif price < 1000:
         return "🎟 Use ₹1000 Voucher"
     else:
         return "❌ No Voucher"
 
 # ==========================
-# MAIN MONITOR
+# MONITOR
 # ==========================
 
-async def monitor():
-    global last_heartbeat
+while True:
+    try:
+        resp = requests.get(API_URL, timeout=30)
+        data = resp.json()
 
-    while True:  # Watchdog loop
-        try:
-            async with async_playwright() as p:
+        products = data.get("products", [])
 
-                browser = await p.chromium.launch(
-                    headless=True,
-                    args=[
-                        "--no-sandbox",
-                        "--disable-setuid-sandbox",
-                        "--disable-dev-shm-usage",
-                        "--disable-gpu",
-                        "--single-process"
-                    ]
-                )
-                print("monitor is running...")
-                page = await browser.new_page()
+        for p in products:
 
-                async def handle_response(response):
-                    if response.status==200:
-                        print("API:", response.url)
-                        try:
-                            data = await response.json()
-                            products = data.get("info", {}).get("products", [])
+            code = str(p.get("code"))
+            name = p.get("name")
+            price = p.get("offerPrice", {}).get("value") or p.get("price", {}).get("value", 0)
+            image = None
 
-                            for product in products:
-                                print("product fetched:", len(products))
-                                product_id = str(product.get("goods_id"))
-                                name = product.get("goods_name")
-                                price = int(float(product.get("salePrice", 0)))
-                                image = product.get("goods_img")
-                                link = f"https://www.sheinindia.in/p/{product_id}"
-                                stock = product.get("stock", 0)
-                                in_stock = stock > 0
+            imgs = p.get("images", [])
+            if imgs:
+                image = imgs[0].get("url")
 
-                                previous_status = product_status.get(product_id)
+            link_path = p.get("url")
+            link = "https://www.sheinindia.in" + link_path
 
-                                # NEW PRODUCT
-                                if product_id not in product_status:
-                                    product_status[product_id] = in_stock
+            in_stock = True  # API returns only in-stock products
 
-                                    if in_stock:
-                                        caption = f"""
-🆕 <b>NEW PRODUCT (IN STOCK)</b>
+            prev = stored_products.get(code)
+
+            # 🚀 NEW PRODUCT
+            if code not in stored_products:
+                stored_products[code] = in_stock
+                save_data(stored_products)
+
+                caption = f"""🆕 <b>NEW PRODUCT</b>
 
 🛍 {name}
 💰 ₹{price}
-{apply_voucher(price)}
+{voucher_text(price)}
 
-🔗 <a href="{link}">Open Product</a>
-"""
-                                        send_photo(caption, image)
+🔗 <a href="{link}">Open Product</a>"""
 
-                                # RESTOCK
-                                elif previous_status is False and in_stock is True:
-                                    product_status[product_id] = True
+                send_photo(caption, image)
 
-                                    caption = f"""
-🔁 <b>RESTOCK ALERT!</b>
+            # 🔁 RESTOCK
+            elif prev == False and in_stock == True:
+                stored_products[code] = True
+                save_data(stored_products)
+
+                caption = f"""🔁 <b>RESTOCK ALERT!</b>
 
 🛍 {name}
 💰 ₹{price}
-{apply_voucher(price)}
+{voucher_text(price)}
 
-🔗 <a href="{link}">Open Product</a>
-"""
-                                    send_photo(caption, image)
+🔗 <a href="{link}">Open Product</a>"""
 
-                                else:
-                                    product_status[product_id] = in_stock
+                send_photo(caption, image)
 
-                        except Exception as e:
-                            print("JSON Error:", e)
+            else:
+                stored_products[code] = in_stock
 
-                page.on("response", handle_response)
+        # WAIT
+        time.sleep(CHECK_INTERVAL)
 
-                while True:
-                    await page.goto(SHEINVERSE_URL, timeout=60000)
-                    await asyncio.sleep(CHECK_INTERVAL)
-
-                    # Heartbeat every 6 hours
-                    if time.time() - last_heartbeat > HEARTBEAT_INTERVAL:
-                        send_message("🟢 SHEINVERSE Monitor Running 24/7 (Free Tier Mode)")
-                        last_heartbeat = time.time()
-
-        except Exception as e:
-            print("Browser crashed. Restarting...", e)
-            await asyncio.sleep(5)
-
-asyncio.run(monitor())
+    except Exception as e:
+        print("Error:", e)
+        time.sleep(10)
