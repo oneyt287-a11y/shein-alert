@@ -14,17 +14,17 @@ CHANNEL_ID = os.getenv("CHANNEL_ID")
 
 API_URL = "https://www.sheinindia.in/api/category/sverse-5939-37961?fields=SITE&currentPage=1&pageSize=45&format=json&query=%3Arelevance&gridColumns=5&advfilter=true&platform=Desktop&showAdsOnNextPage=false&is_ads_enable_plp=true&displayRatings=true&segmentIds=&&store=shein"
 
-CHECK_INTERVAL = 15  # ⚡ Fast mode
+CHECK_INTERVAL = 15
 DATA_FILE = "products.json"
 
 # ==========================
-# FAST SESSION (Speed Boost)
+# FAST SESSION
 # ==========================
 
 session = requests.Session()
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    "User-Agent": "Mozilla/5.0",
     "Accept": "application/json",
     "Connection": "keep-alive"
 }
@@ -85,39 +85,19 @@ def send_photo(caption, image_url):
     session.post(url, data=payload, timeout=15)
 
 # ==========================
-# VOUCHER LOGIC
+# PRICE (Exact Display From Site)
 # ==========================
 
-def voucher_text(price_value):
-    if price_value < 500:
-        return "🎟 Use ₹500 Voucher"
-    elif price_value < 1000:
-        return "🎟 Use ₹1000 Voucher"
-    else:
-        return "🎟 Eligible for ₹1000 Voucher"
-
-# ==========================
-# PRICE FIX (Accurate)
-# ==========================
-
-def get_correct_price(product):
+def get_display_price(product):
     offer = product.get("offerPrice", {})
     regular = product.get("price", {})
 
-    offer_value = offer.get("value")
-    regular_value = regular.get("value")
-
-    if offer_value and regular_value:
-        if offer_value < regular_value:
-            return offer_value, offer.get("displayformattedValue")
-        else:
-            return regular_value, regular.get("displayformattedValue")
-    elif offer_value:
-        return offer_value, offer.get("displayformattedValue")
-    elif regular_value:
-        return regular_value, regular.get("displayformattedValue")
+    if offer.get("displayformattedValue"):
+        return offer.get("displayformattedValue")
+    elif regular.get("displayformattedValue"):
+        return regular.get("displayformattedValue")
     else:
-        return 0, "₹0"
+        return "Price Not Available"
 
 # ==========================
 # SIZE EXTRACTION
@@ -140,10 +120,10 @@ def extract_sizes(product):
     return sizes
 
 # ==========================
-# MAIN MONITOR LOOP
+# MAIN LOOP
 # ==========================
 
-print("🚀 SHEINVERSE BOT STARTED (LIGHTNING MODE)")
+print("🚀 SHEINVERSE BOT STARTED (ALL PRODUCTS MODE)")
 
 while True:
     try:
@@ -159,7 +139,7 @@ while True:
             code = str(p.get("code"))
             name = p.get("name")
 
-            price_value, display_price = get_correct_price(p)
+            display_price = get_display_price(p)
 
             image = None
             imgs = p.get("images", [])
@@ -185,8 +165,6 @@ while True:
 🛍 <b>{name}</b>
 💰 {display_price}
 📦 Sizes: {", ".join(current_sizes) if current_sizes else "Available"}
-
-{voucher_text(price_value)}
 
 🔗 {link}
 """
@@ -224,10 +202,8 @@ while True:
                 stored_products[code]["sizes"] = list(current_sizes)
                 save_data(stored_products)
 
-        # Smart sleep adjustment
         elapsed = time.time() - start_time
-        sleep_time = max(0, CHECK_INTERVAL - elapsed)
-        time.sleep(sleep_time)
+        time.sleep(max(0, CHECK_INTERVAL - elapsed))
 
     except Exception as e:
         print("Error:", e)
