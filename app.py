@@ -11,36 +11,27 @@ from flask import Flask
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 
+CATEGORY_PAGE = "https://www.sheinindia.in/sheinverse-c-37961.html"
+
 API_URL = "https://www.sheinindia.in/api/category/sverse-5939-37961?fields=SITE&currentPage=1&pageSize=45&format=json&query=%3Arelevance&gridColumns=5&advfilter=true&platform=Desktop&showAdsOnNextPage=false&is_ads_enable_plp=true&displayRatings=true&segmentIds=&&store=shein"
 
-NORMAL_MIN = 15
-NORMAL_MAX = 25
-FLASH_INTERVAL = 5
-FLASH_DURATION = 120  # seconds
+# Safe for Railway (datacenter IP)
+NORMAL_MIN = 25
+NORMAL_MAX = 35
+FLASH_INTERVAL = 10
+FLASH_DURATION = 60
 
 DATA_FILE = "products.json"
 
-# ================= STEALTH HEADERS =================
-
 USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
-    "Mozilla/5.0 (X11; Linux x86_64)",
-    "Mozilla/5.0 (Windows NT 10.0; WOW64)",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/119 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/118 Safari/537.36",
 ]
-
-def get_headers():
-    return {
-        "User-Agent": random.choice(USER_AGENTS),
-        "Accept": "application/json",
-        "Connection": "keep-alive",
-        "Referer": "https://www.sheinindia.in/",
-        "Cache-Control": "no-cache",
-    }
 
 session = requests.Session()
 
-# ================= FLASK KEEP ALIVE =================
+# ================= WEB SERVER (Railway requires open port) =================
 
 app = Flask(__name__)
 
@@ -49,7 +40,8 @@ def home():
     return "SHEINVERSE BOT RUNNING ⚡"
 
 def run_web():
-    app.run(host="0.0.0.0", port=8000)
+    port = int(os.environ.get("PORT", 8000))
+    app.run(host="0.0.0.0", port=port)
 
 threading.Thread(target=run_web, daemon=True).start()
 
@@ -75,7 +67,8 @@ def send_message(text):
         session.post(url, data={
             "chat_id": CHANNEL_ID,
             "text": text,
-            "parse_mode": "HTML"
+            "parse_mode": "HTML",
+            "disable_web_page_preview": False
         }, timeout=10)
     except:
         pass
@@ -92,53 +85,90 @@ def send_photo(caption, image_url):
     except:
         pass
 
+# ================= HEADERS =================
+
+def browser_headers():
+    return {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-IN,en;q=0.9",
+        "Connection": "keep-alive",
+    }
+
+def api_headers():
+    return {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept": "application/json, text/plain, */*",
+        "Referer": CATEGORY_PAGE,
+        "X-Requested-With": "XMLHttpRequest",
+        "Connection": "keep-alive",
+    }
+
+# ================= SESSION WARMUP =================
+
+last_warmup = 0
+
+def warmup_session():
+    global last_warmup
+    if time.time() - last_warmup > 300:  # warm every 5 minutes
+        try:
+            print("🌐 Refreshing session cookies...")
+            session.get(CATEGORY_PAGE, headers=browser_headers(), timeout=15)
+            last_warmup = time.time()
+            time.sleep(2)
+        except:
+            pass
+
 # ================= HELPERS =================
 
 def get_price(product):
     offer = product.get("offerPrice", {})
     regular = product.get("price", {})
+
     if offer.get("displayformattedValue"):
         return offer["displayformattedValue"]
+
     if regular.get("displayformattedValue"):
         return regular["displayformattedValue"]
+
     return "Price N/A"
 
 def extract_sizes(product):
     sizes = set()
     variants = product.get("skuList") or []
+
     for v in variants:
         size = v.get("sizeName") or v.get("size")
         if v.get("inStock"):
             sizes.add(size)
+
     return sizes
 
-# ================= SAFE FETCH =================
+# ================= FETCH =================
 
 def fetch_products():
-    for attempt in range(3):
-        try:
-            response = session.get(API_URL, headers=get_headers(), timeout=15)
+    try:
+        warmup_session()
 
-            if response.status_code == 429:
-                print("⚠ Rate limited, backing off...")
-                time.sleep(10)
-                continue
+        response = session.get(API_URL, headers=api_headers(), timeout=15)
 
-            if response.status_code != 200:
-                return None
+        if response.status_code != 200:
+            print("Blocked:", response.status_code)
+            return None
 
-            if "application/json" not in response.headers.get("Content-Type", ""):
-                return None
+        if "application/json" not in response.headers.get("Content-Type", ""):
+            print("Non JSON response")
+            return None
 
-            return response.json()
+        return response.json()
 
-        except:
-            time.sleep(3)
-    return None
+    except Exception as e:
+        print("Fetch error:", e)
+        return None
 
 # ================= MAIN LOOP =================
 
-print("🚀 ENTERPRISE MODE ACTIVATED")
+print("🚀 SHEINVERSE MONITOR STARTED (Railway Mode)")
 
 flash_mode_until = 0
 
@@ -149,12 +179,11 @@ while True:
 
         data = fetch_products()
         if not data:
-            time.sleep(5)
+            time.sleep(15)
             continue
 
         products = data.get("products", [])
-
-        activity_detected = False
+        activity = False
 
         for p in products:
 
@@ -169,9 +198,8 @@ while True:
                 image = imgs[0].get("url")
 
             current_sizes = extract_sizes(p)
-            old_data = stored_products.get(code)
+            old = stored_products.get(code)
 
-            # NEW PRODUCT
             if code not in stored_products:
 
                 stored_products[code] = {"sizes": list(current_sizes)}
@@ -191,12 +219,12 @@ while True:
                 else:
                     send_message(caption)
 
-                activity_detected = True
+                activity = True
 
             else:
-                old_sizes = set(old_data.get("sizes", []))
-                sold_out = old_sizes - current_sizes
+                old_sizes = set(old.get("sizes", []))
                 restocked = current_sizes - old_sizes
+                sold_out = old_sizes - current_sizes
 
                 if restocked:
                     send_message(f"""🔁 <b>SIZE RESTOCKED</b>
@@ -207,7 +235,7 @@ while True:
 
 🔗 {link}
 """)
-                    activity_detected = True
+                    activity = True
 
                 if sold_out:
                     send_message(f"""⚠ <b>SIZE SOLD OUT</b>
@@ -221,14 +249,12 @@ while True:
                 stored_products[code]["sizes"] = list(current_sizes)
                 save_data(stored_products)
 
-        # 🚀 ACTIVATE FLASH MODE
-        if activity_detected:
+        if activity:
             flash_mode_until = time.time() + FLASH_DURATION
-            print("⚡ FLASH MODE ACTIVATED")
+            print("⚡ Flash mode activated")
 
-        # Sleep logic
         if in_flash:
-            sleep_time = FLASH_INTERVAL + random.uniform(0.5, 1.5)
+            sleep_time = FLASH_INTERVAL + random.uniform(1, 3)
         else:
             sleep_time = random.randint(NORMAL_MIN, NORMAL_MAX)
 
@@ -236,4 +262,4 @@ while True:
 
     except Exception as e:
         print("Loop error:", e)
-        time.sleep(5)
+        time.sleep(15)
