@@ -1,10 +1,12 @@
-import asyncio
-import aiohttp
+import requests
 import time
 import json
 import os
-from flask import Flask
 import threading
+from flask import Flask
+from concurrent.futures import ThreadPoolExecutor
+import aiohttp
+import asyncio
 
 app = Flask(__name__)
 
@@ -12,134 +14,170 @@ app = Flask(__name__)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 API_URL = "https://www.sheinindia.in/api/category/sverse-5939-37961?fields=SITE&currentPage=1&pageSize=45&format=json&query=%3Arelevance&gridColumns=5&advfilter=true&platform=Desktop&showAdsOnNextPage=false&is_ads_enable_plp=true&displayRatings=true&segmentIds=&&store=shein"
-CHECK_INTERVAL = 20  # SUPER FAST
+CHECK_INTERVAL = 30
 DATA_FILE = "products.json"
 
-print(f"🚀 AIOHTTP BOT: Token={bool(BOT_TOKEN)}, Channel={bool(CHANNEL_ID)}")
-
+# SHARED STATE
+stored_products_lock = threading.Lock()
 stored_products = {}
-data_lock = threading.Lock()
 
 @app.route("/")
 def home():
-    return {"status": "SHEINVERSE AIOHTTP ULTRA-FAST 🚀"}
+    return {"status": "SHEINVERSE BOT v2.0 🚀"}
 
-# ASYNC STORAGE
-async def load_stored():
+def load_data():
     global stored_products
     try:
         if os.path.exists(DATA_FILE):
             with open(DATA_FILE, "r") as f:
-                stored_products = json.load(f)
-    except: pass
+                stored_products.update(json.load(f))
+                print(f"📂 Loaded {len(stored_products)} products")
+    except Exception as e:
+        print(f"⚠️ Load error: {e}")
 
-def save_stored():
-    with data_lock:
+def save_data():
+    try:
         with open(DATA_FILE, "w") as f:
             json.dump(stored_products, f)
+    except Exception as e:
+        print(f"⚠️ Save error: {e}")
 
-# ASYNC TELEGRAM (PARALLEL)
-async def send_message(session, text):
-    if not BOT_TOKEN or not CHANNEL_ID:
-        print("❌ No Telegram creds")
-        return
+# TELEGRAM
+def send_message(text):
+    if not all([BOT_TOKEN, CHANNEL_ID]):
+        print("❌ Missing BOT_TOKEN or CHANNEL_ID")
+        return False
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": CHANNEL_ID, "text": text[:4096], "parse_mode": "HTML"}
-    async with session.post(url, json=payload) as resp:
-        print(f"📱 Sent: {resp.status}")
+    try:
+        resp = requests.post(url, json={
+            "chat_id": CHANNEL_ID, 
+            "text": text[:4096], 
+            "parse_mode": "HTML"
+        }, timeout=10)
+        return resp.status_code == 200
+    except:
+        return False
 
-async def send_photo(session, caption, image_url):
-    if not BOT_TOKEN or not CHANNEL_ID: return
+def send_photo(caption, image_url):
+    if not all([BOT_TOKEN, CHANNEL_ID]): return False
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
-    payload = {"chat_id": CHANNEL_ID, "photo": image_url, "caption": caption[:1020], "parse_mode": "HTML"}
-    async with session.post(url, json=payload) as resp:
-        print(f"📸 Photo: {resp.status}")
+    try:
+        resp = requests.post(url, json={
+            "chat_id": CHANNEL_ID, 
+            "photo": image_url, 
+            "caption": caption[:1020], 
+            "parse_mode": "HTML"
+        }, timeout=15)
+        return resp.status_code == 200
+    except:
+        return False
 
-# ASYNC PROCESSOR
-async def process_product(session, p):
-    code = str(p.get("code", ""))
-    if not code: return
-    
-    name = p.get("name", "")
-    price = p.get("offerPrice", {}).get("value") or p.get("price", {}).get("value") or 0
-    image = p.get("images", [{}])[0].get("url")
-    link = "https://www.sheinindia.in" + p.get("url", "")
-    
+def extract_sizes(product):
     sizes = set()
-    variants = p.get("skuList") or p.get("variantOptions") or []
+    variants = product.get("skuList") or []
     for v in variants:
         size = v.get("size") or v.get("sizeName") or v.get("value")
-        if size and (v.get("inStock") is True or v.get("inStock") is None):
+        if size and v.get("inStock") != False:
             sizes.add(size)
+    return sizes
+
+def process_product(product):
+    code = str(product.get("code") or "")
+    if not code: return
     
-    with data_lock:
-        prev = stored_products.get(code)
-        old_sizes = set(prev.get("sizes", [])) if prev else set()
+    name = product.get("name", "Unknown")
+    price = product.get("offerPrice", {}).get("value") or product.get("price", {}).get("value") or 0
+    images = product.get("images", [])
+    image_url = images[0].get("url") if images else None
+    url_path = product.get("url", "")
+    product_url = f"https://www.sheinindia.in{url_path}" if url_path else ""
+    sizes = extract_sizes(product)
+    
+    with stored_products_lock:
+        prev_data = stored_products.get(code)
+        prev_sizes = set(prev_data.get("sizes", [])) if prev_data else set()
     
     # NEW PRODUCT
     if code not in stored_products:
         print(f"🆕 NEW: {name}")
-        with data_lock:
+        with stored_products_lock:
             stored_products[code] = {"sizes": list(sizes)}
-        caption = f"🆕 <b>NEW</b>
+        
+        caption = f"""🆕 <b>NEW PRODUCT!</b>
+
 🛍 <b>{name}</b>
 💰 ₹{price}
-📦 {', '.join(sizes) or 'Available'}
-🔗 {link}"
-        if image:
-            await send_photo(session, caption, image)
+📦 Sizes: {', '.join(sizes) or 'N/A'}
+
+🔗 {product_url}"""
+        
+        if image_url and send_photo(caption, image_url):
+            print(f"✅ Sent photo for {name}")
         else:
-            await send_message(session, caption)
+            send_message(caption)
+            print(f"✅ Sent message for {name}")
     
-    # UPDATES
+    # SIZE CHANGES
     else:
-        sold_out = old_sizes - sizes
-        restocked = sizes - old_sizes
+        sold_out = prev_sizes - sizes
+        restocked = sizes - prev_sizes
+        
         if sold_out:
-            await send_message(session, f"⚠️ <b>SOLD OUT</b>
+            msg = f"""⚠️ <b>SIZES SOLD OUT</b>
+
 🛍 <b>{name}</b>
 ❌ {', '.join(sold_out)}
-🔗 {link}")
+🔗 {product_url}"""
+            send_message(msg)
+            print(f"⚠️ Sold out: {name}")
+        
         if restocked:
-            await send_message(session, f"🔥 <b>RESTOCK</b>
+            msg = f"""🔥 <b>SIZES RESTOCKED!</b>
+
 🛍 <b>{name}</b>
 ✅ {', '.join(restocked)}
-🔗 {link}")
+🔗 {product_url}"""
+            send_message(msg)
+            print(f"🔥 Restock: {name}")
         
-        with data_lock:
+        with stored_products_lock:
             stored_products[code]["sizes"] = list(sizes)
 
-# ULTRA-FAST MAIN LOOP
-async def monitor_loop():
-    await load_stored()
-    print("🚀 AIOHTTP MONITOR STARTED")
+def monitor_loop():
+    load_data()
+    print("🚀 SHEINVERSE MONITOR STARTED")
     
-    connector = aiohttp.TCPConnector(limit=50, limit_per_host=20)
-    timeout = aiohttp.ClientTimeout(total=8)
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+    })
     
-    async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-        while True:
-            try:
-                print(f"🔄 aiohttp poll... ({time.strftime('%H:%M:%S')})")
-                async with session.get(API_URL) as resp:
-                    data = await resp.json()
-                    products = data.get("products", [])
-                    print(f"📦 {len(products)} products")
-                    
-                    # PARALLEL PROCESSING
-                    tasks = [process_product(session, p) for p in products]
-                    await asyncio.gather(*tasks, return_exceptions=True)
+    while True:
+        try:
+            print(f"🔄 Polling Shein... ({time.strftime('%H:%M:%S')})")
+            resp = session.get(API_URL, timeout=15)
+            
+            if resp.status_code != 200:
+                print(f"❌ API Error: {resp.status_code}")
+            else:
+                data = resp.json()
+                products = data.get("products", [])
+                print(f"📦 Found {len(products)} products")
                 
-                save_stored()
-                await asyncio.sleep(CHECK_INTERVAL)
-                
-            except Exception as e:
-                print(f"💥 Error: {e}")
-                await asyncio.sleep(5)
-
-def run_async():
-    asyncio.run(monitor_loop())
+                if products:
+                    with ThreadPoolExecutor(max_workers=8) as executor:
+                        executor.map(process_product, products)
+                    save_data()
+                else:
+                    print("⚠️ No products in response")
+            
+        except Exception as e:
+            print(f"💥 Error: {e}")
+        
+        time.sleep(CHECK_INTERVAL)
 
 if __name__ == "__main__":
-    threading.Thread(target=run_async, daemon=True).start()
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+    thread = threading.Thread(target=monitor_loop, daemon=True)
+    thread.start()
+    print("🌐 Flask ready at /")
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=False)
