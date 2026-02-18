@@ -13,8 +13,8 @@ app = Flask(__name__)
 # CONFIG
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
-API_URL = "https://www.sheinindia.in/api/category/sverse-5939-37961?fields=SITE&currentPage=1&pageSize=45&format=json&query=%3Arelevance&gridColumns=5&advfilter=true&platform=Desktop&showAdsOnNextPage=false&is_ads_enable_plp=true&displayRatings=true&segmentIds=&&store=shein"
-CHECK_INTERVAL = 30
+API_URL = "https://www.sheinindia.in/api/category/sverse-5939-37961"
+CHECK_INTERVAL = 10
 DATA_FILE = "products.json"
 
 # SHARED STATE
